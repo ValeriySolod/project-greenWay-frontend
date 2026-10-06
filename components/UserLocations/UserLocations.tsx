@@ -1,46 +1,46 @@
 'use client';
 
-import css from './UserLocations.module.css';
-import { useEffect, useRef, useState } from 'react';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { Suspense, useEffect, useState } from 'react';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { isAxiosError } from 'axios';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+
 import { getUserLocations } from '@/lib/api/getUserLocations';
+import { getCategories } from '@/lib/api/getCategories';
 import { useAuthStore } from '@/lib/store/authStore';
 import Loader from '@/components/ui/Loader/Loader';
+import Pagination from '@/components/ui/Pagination/Pagination';
 import LocationCard from '@/components/LocationCard/LocationCard';
-import { getCategories } from '@/lib/api/getCategories';
 import EmptyLocations from '../EmptyLocations/EmptyLocations';
+
+import css from './UserLocations.module.css';
 
 type Props = { userId?: string; isOwnProfile?: boolean };
 
-const SMALL_PAGE_SIZE = 6;
-const DESKTOP_PAGE_SIZE = 9;
+const SMALL_PAGE_SIZE = 4;
+const DESKTOP_PAGE_SIZE = 6;
 
-export default function UserLocations({ userId, isOwnProfile }: Props) {
+function UserLocationsContent({ userId, isOwnProfile }: Props) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [pageSize, setPageSize] = useState<number | null>(null);
-  const newPageStart = useRef<number | null>(null);
-  const firstNewItem = useRef<HTMLLIElement | null>(null);
 
   const currentUserId = useAuthStore((state) => state.user?._id);
-
   const targetUserId = isOwnProfile ? currentUserId : userId;
   const limit = pageSize ?? SMALL_PAGE_SIZE;
 
+  const pageFromUrl = Number(searchParams.get('page'));
+  const page = Number.isInteger(pageFromUrl) && pageFromUrl > 0 ? pageFromUrl : 1;
+
   useEffect(() => {
     const desktop = window.matchMedia('(min-width: 1440px)');
-
-    const updatePageSize = () => {
-      newPageStart.current = null;
-
+    const updatePageSize = () =>
       setPageSize(desktop.matches ? DESKTOP_PAGE_SIZE : SMALL_PAGE_SIZE);
-    };
 
     updatePageSize();
-
     desktop.addEventListener('change', updatePageSize);
-
-    return () => {
-      desktop.removeEventListener('change', updatePageSize);
-    };
+    return () => desktop.removeEventListener('change', updatePageSize);
   }, []);
 
   const { data: categories } = useQuery({
@@ -48,63 +48,63 @@ export default function UserLocations({ userId, isOwnProfile }: Props) {
     queryFn: getCategories,
   });
 
-  const {
-    data,
-    error,
-    fetchNextPage,
-    hasNextPage,
-    isFetching,
-    isFetchingNextPage,
-    isPending,
-    refetch,
-  } = useInfiniteQuery({
-    queryKey: ['userLocations', targetUserId, limit],
+  const { data, error, isPending, isFetching, refetch } = useQuery({
+    queryKey: ['userLocations', targetUserId, page, limit],
+    queryFn: () => getUserLocations(targetUserId as string, page, limit),
     enabled: pageSize !== null && Boolean(targetUserId),
-    initialPageParam: 1,
-
-    queryFn: ({ pageParam }) => {
-      if (!targetUserId) {
-        throw new Error('User id is required');
-      }
-
-      return getUserLocations(targetUserId, pageParam, limit);
-    },
-
-    getNextPageParam: (lastPage) =>
-      lastPage.page < lastPage.totalPages ? lastPage.page + 1 : undefined,
+    placeholderData: keepPreviousData,
+    retry: (failureCount, err) =>
+      !(isAxiosError(err) && err.response?.status === 404) && failureCount < 2,
   });
 
-  const items = data?.pages.flatMap((page) => page.items) ?? [];
+  const handlePageChange = (nextPage: number) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('page', String(nextPage));
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    document
+      .getElementById('user-locations')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const items = data?.items ?? [];
+  const totalPages = data?.totalPages ?? 0;
+  const hasNoLocations = data?.totalItems === 0;
+  const hasEmptyRequestedPage = Boolean(data) && items.length === 0 && !hasNoLocations;
+  const userIsNotFound = isAxiosError(error) && error.response?.status === 404;
   const typeNames = new Map(
     categories?.locationTypes.map((type) => [type.slug, type.type]) ?? [],
   );
 
-  useEffect(() => {
-    if (newPageStart.current !== null && items.length > newPageStart.current) {
-      firstNewItem.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      });
-
-      newPageStart.current = null;
-    }
-  }, [items.length]);
-
-  function showMore() {
-    newPageStart.current = items.length;
-    void fetchNextPage();
-  }
-
   if (isPending) {
-    return <Loader />;
+    return (
+      <section className={css.userLocations}>
+        <Loader />
+      </section>
+    );
   }
 
-  if (error && items.length === 0) {
+  if (userIsNotFound) {
+    return (
+      <section className={css.userLocations}>
+        <EmptyLocations
+          title="Користувача не знайдено"
+          linkText="Назад до локацій"
+          link="/locations"
+        />
+      </section>
+    );
+  }
+
+  if (error) {
     return (
       <section className={css.userLocations}>
         <div className={css.status} role="alert">
           <p>Не вдалося завантажити місця.</p>
-          <button className={css.retryButton} type="button" onClick={() => void refetch()}>
+          <button
+            className={css.retryButton}
+            type="button"
+            onClick={() => void refetch()}
+          >
             Спробувати ще раз
           </button>
         </div>
@@ -112,7 +112,7 @@ export default function UserLocations({ userId, isOwnProfile }: Props) {
     );
   }
 
-  if (items.length === 0) {
+  if (hasNoLocations) {
     return (
       <section className={css.userLocations}>
         <EmptyLocations
@@ -128,18 +128,28 @@ export default function UserLocations({ userId, isOwnProfile }: Props) {
     );
   }
 
+  if (hasEmptyRequestedPage) {
+    return (
+      <section className={css.userLocations}>
+        <EmptyLocations
+          title="На цій сторінці локацій немає"
+          linkText="Перейти на першу сторінку"
+          link={`${pathname}?page=1`}
+        />
+      </section>
+    );
+  }
+
   return (
     <section
+      id="user-locations"
       className={css.userLocations}
       aria-label="Локації користувача"
       aria-busy={isFetching}
     >
       <ul className={css.grid}>
-        {items.map((location, index) => (
-          <li
-            key={location._id}
-            ref={index === newPageStart.current ? firstNewItem : undefined}
-          >
+        {items.map((location) => (
+          <li key={location._id}>
             <LocationCard
               showEdit={isOwnProfile}
               location={{
@@ -151,34 +161,24 @@ export default function UserLocations({ userId, isOwnProfile }: Props) {
           </li>
         ))}
       </ul>
-      {hasNextPage && (
-        <div className={css.moreWrap}>
-          <button
-            className={css.moreButton}
-            type="button"
-            onClick={showMore}
-            disabled={isFetchingNextPage}
-          >
-            {isFetchingNextPage ? 'Завантажуємо…' : 'Показати ще'}
-          </button>
-        </div>
-      )}
 
-      {error && (
-        <section className={css.userLocations}>
-          <p className={css.error} role="alert">
-            Не вдалося завантажити наступні місця.
-          </p>
-        </section>
-      )}
-
-      {isFetching && !isFetchingNextPage && (
-        <section className={css.userLocations}>
-          <p className={css.updating} role="status">
-            Оновлюємо результати…
-          </p>
-        </section>
-      )}
+      <div className={css.paginationWrap}>
+        <Pagination page={page} totalPages={totalPages} onPageChange={handlePageChange} />
+      </div>
     </section>
+  );
+}
+
+export default function UserLocations(props: Props) {
+  return (
+    <Suspense
+      fallback={
+        <section className={css.userLocations}>
+          <Loader />
+        </section>
+      }
+    >
+      <UserLocationsContent {...props} />
+    </Suspense>
   );
 }
